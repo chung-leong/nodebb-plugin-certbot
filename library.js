@@ -1,88 +1,69 @@
 'use strict';
 
+const os = require('os');
+const http = require('http');
+const _ = require.main.require('lodash');
 const nconf = require.main.require('nconf');
 const winston = require.main.require('winston');
-
 const meta = require.main.require('./src/meta');
-
-const controllers = require('./lib/controllers');
-
 const routeHelpers = require.main.require('./src/routes/helpers');
+const controllers = require('./lib/controllers');
+const helpers = require('./lib/helpers');
 
-const plugin = {};
-
-plugin.init = async (params) => {
-	const { router /* , middleware , controllers */ } = params;
-
-	// Settings saved in the plugin settings can be retrieved via settings methods
-	const { setting1, setting2 } = await meta.settings.get('quickstart');
-	if (setting1) {
-		console.log(setting2);
-	}
-
-	/**
-	 * We create two routes for every view. One API call, and the actual route itself.
-	 * Use the `setupPageRoute` helper and NodeBB will take care of everything for you.
-	 *
-	 * Other helpers include `setupAdminPageRoute` and `setupAPIRoute`
-	 * */
-	routeHelpers.setupPageRoute(router, '/quickstart', [(req, res, next) => {
-		winston.info(`[plugins/quickstart] In middleware. This argument can be either a single middleware or an array of middlewares`);
-		setImmediate(next);
-	}], (req, res) => {
-		winston.info(`[plugins/quickstart] Navigated to ${nconf.get('relative_path')}/quickstart`);
-		res.render('quickstart', { uid: req.uid });
-	});
-
-	routeHelpers.setupAdminPageRoute(router, '/admin/plugins/quickstart', [], controllers.renderAdminPage);
+module.exports = {
+	init,
+	addRoutes,
+	addAdminNavigation,
+	handleSettingChange,
 };
 
-/**
- * If you wish to add routes to NodeBB's RESTful API, listen to the `static:api.routes` hook.
- * Define your routes similarly to above, and allow core to handle the response via the
- * built-in helpers.formatApiResponse() method.
- *
- * In this example route, the `ensureLoggedIn` middleware is added, which means a valid login
- * session or bearer token (which you can create via ACP > Settings > API Access) needs to be
- * passed in.
- *
- * To call this example route:
- *   curl -X GET \
- * 		http://example.org/api/v3/plugins/quickstart/test \
- * 		-H "Authorization: Bearer some_valid_bearer_token"
- *
- * Will yield the following response JSON:
- * 	{
- *		"status": {
- *			"code": "ok",
- *			"message": "OK"
- *		},
- *		"response": {
- *			"foobar": "test"
- *		}
- *	}
- */
-plugin.addRoutes = async ({ router, middleware, helpers }) => {
+let currentSettings;
+
+async function init(params) {
+	const { router } = params;
+	currentSettings = await meta.settings.get('certbot');
+
+	routeHelpers.setupAdminPageRoute(router, '/admin/plugins/certbot', [], controllers.renderAdminPage);
+}
+
+async function addRoutes({ router, middleware }) {
 	const middlewares = [
-		middleware.ensureLoggedIn,			// use this if you want only registered users to call this route
-		// middleware.admin.checkPrivileges,	// use this to restrict the route to administrators
+		middleware.ensureLoggedIn,
+		middleware.admin.checkPrivileges,
 	];
+	routeHelpers.setupApiRoute(router, 'post', '/certbot/certificates', middlewares, helpers.listCertificates);
+	routeHelpers.setupApiRoute(router, 'post', '/certbot/renewal', middlewares, helpers.renewCertificates);
+}
 
-	routeHelpers.setupApiRoute(router, 'get', '/quickstart/:param1', middlewares, (req, res) => {
-		helpers.formatApiResponse(200, res, {
-			foobar: req.params.param1,
-		});
-	});
-};
-
-plugin.addAdminNavigation = (header) => {
+function addAdminNavigation(header) {
 	header.plugins.push({
-		route: '/plugins/quickstart',
+		route: '/plugins/certbot',
 		icon: 'fa-tint',
-		name: 'Quickstart',
+		name: 'Certbot',
 	});
-
 	return header;
-};
+}
 
-module.exports = plugin;
+async function handleSettingChange({ plugin, settings, caller }) {
+	if (plugin === 'certbot') {
+		try {
+			const domainsBefore = parseDomains(currentSettings.names);
+			const domains = parseDomains(settings.names);
+			const emailBefore = currentSettings.email;
+			const email = settings.email;
+			currentSettings = settings;
+	
+			if (_.xor(domains, domainsBefore).length > 0) {
+				helpers.acquireCertificates(domains, email, caller);
+			} else if (email !== emailBefore) {
+				helpers.updateContactEmail(email, caller);
+			}	
+		} catch (err) {
+			winston.error(err);
+		}
+	}
+}
+
+function parseDomains(s) {
+	return _.filter(s.trim().split(/\s+/));
+}
